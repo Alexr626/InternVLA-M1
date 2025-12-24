@@ -594,11 +594,91 @@ class SingleFrankaRobotiqDeltaJointsDataConfig:
 
 
 
+###########################################################################################
+
+
+class FrankaGelloJointsDataConfig:
+    """Data config for Franka robot with Gello teleoperation (joint space control).
+
+    This config works with datasets created using convert_franka_data_to_lerobot.py
+    which stores 8-dim state/action (7 joints + 1 gripper).
+    """
+    video_keys = [
+        "video.image",        # front facing camera
+        "video.wrist_image",  # wrist camera
+    ]
+    state_keys = [
+        "state.joints",
+        "state.gripper",
+    ]
+    action_keys = [
+        "action.joints",
+        "action.gripper",
+    ]
+
+    language_keys = ["annotation.human.action.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(16))  # 16 future action steps
+
+    def modality_config(self):
+        video_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.video_keys,
+        )
+        state_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.state_keys,
+        )
+        action_modality = ModalityConfig(
+            delta_indices=self.action_indices,
+            modality_keys=self.action_keys,
+        )
+        language_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.language_keys,
+        )
+        modality_configs = {
+            "video": video_modality,
+            "state": state_modality,
+            "action": action_modality,
+            "language": language_modality,
+        }
+        return modality_configs
+
+    def transform(self):
+        transforms = [
+            # state transforms
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={
+                    "state.joints": "q99",
+                    "state.gripper": "binary",
+                },
+            ),
+            # action transforms
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={
+                    "action.joints": "q99",
+                    "action.gripper": "binary",
+                },
+            ),
+        ]
+
+        return ComposedModalityTransform(transforms=transforms)
+
+
+###########################################################################################
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
     "oxe_bridge": OxeBridgeDataConfig(),
     "oxe_rt1": OxeRT1DataConfig(),
     "demo_sim_franka_delta_joints": SingleFrankaRobotiqDeltaJointsDataConfig(),
-    "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig()
+    "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
+    "franka_gello_joints": FrankaGelloJointsDataConfig(),
 }

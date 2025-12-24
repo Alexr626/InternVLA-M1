@@ -53,5 +53,11 @@ DATASET_NAMED_MIXTURES = {
         ("custom_dataset_name_2", 1.0, "custom_robot_config"),
     ],
 
+    # Franka Gello teleoperation datasets
+    # Dataset name should match the directory name under playground/Datasets/
+    # Created using: python scripts/convert_franka_data_to_lerobot_internvla.py --dataset-name <name>
+    "franka_pick_and_place_12_13_internvla": [
+        ("franka_pick_and_place_12_13_internvla", 1.0, "franka_gello_joints"),
+    ],
 
 }

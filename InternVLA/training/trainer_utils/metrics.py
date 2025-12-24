@@ -75,14 +75,16 @@ def build_param_lr_groups(model, cfg):
         try:
             for attr in module_name.split("."):
                 module = getattr(module, attr)
-            params = list(module.parameters())
-            param_groups.append({"params": params, "lr": lr, "name": module_name})
-            used_params.update(id(p) for p in params)
+            # Only include trainable parameters (requires_grad=True)
+            params = [p for p in module.parameters() if p.requires_grad]
+            if params:  # Only add group if it has trainable params
+                param_groups.append({"params": params, "lr": lr, "name": module_name})
+                used_params.update(id(p) for p in params)
         except AttributeError:
             ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
 
-    # assign base learning rate to the remaining unused parameters
-    other_params = [p for p in model.parameters() if id(p) not in used_params]
+    # assign base learning rate to the remaining unused trainable parameters
+    other_params = [p for p in model.parameters() if id(p) not in used_params and p.requires_grad]
     if other_params:
         param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
 
@@ -169,9 +171,12 @@ class TrainerUtils:
                     print(f"⚠️ module path does not exist, cannot freeze: {path}")
                     continue
 
-        dist.barrier()  # synchronize when distributed training
-        if dist.get_rank == 0:
-            print(f"🔒 Frozen modules with re pattern: {frozen}")
+        # Print status (no barrier needed - freezing is a local operation)
+        if dist.is_initialized() and dist.get_rank() == 0:
+            if frozen:
+                print(f"🔒 Frozen modules: {frozen}")
+            else:
+                print("🔓 No modules frozen (full fine-tuning)")
         return model
 
     @staticmethod
@@ -180,7 +185,7 @@ class TrainerUtils:
         print the total number of parameters and trainable parameters of the model
         :param model: PyTorch model instance
         """
-        if dist.get_rank() != 0:
+        if dist.is_initialized() and dist.get_rank() != 0:
             return
         print("📊 model parameter statistics:")
         num_params = sum(p.numel() for p in model.parameters())
@@ -202,7 +207,7 @@ class TrainerUtils:
         """
         if not checkpoint_path:
             return []
-        if dist.get_rank() == 0:
+        if not dist.is_initialized() or dist.get_rank() == 0:
             print(f"📦 loading checkpoint: {checkpoint_path}")
         try:
             checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -223,7 +228,7 @@ class TrainerUtils:
                     sub_state_dict = {k[len(prefix) :]: v for k, v in checkpoint.items() if k.startswith(prefix)}
                     if sub_state_dict:
                         module.load_state_dict(sub_state_dict, strict=True)
-                        if dist.get_rank() == 0:
+                        if not dist.is_initialized() or dist.get_rank() == 0:
                             print(f"✅ parameters loaded to module '{path}'")
                         loaded_modules.append(path)
                     else:
@@ -233,7 +238,7 @@ class TrainerUtils:
         else:  # full load
             try:
                 model.load_state_dict(checkpoint, strict=True)
-                if dist.get_rank() == 0:
+                if not dist.is_initialized() or dist.get_rank() == 0:
                     print("✅ loaded <full_model> model parameters")
                 loaded_modules = ["<full_model>"]
             except Exception as e:

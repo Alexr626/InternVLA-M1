@@ -42,7 +42,11 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
         data_root_dir = vla_dataset_cfg.data_root_dir
         data_mix = vla_dataset_cfg.data_mix
 
-        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
+        # Check if delete_pause_frame is set in config, default to True for backward compatibility
+        # Note: Set to False for joint-space datasets (action_type: joints)
+        delete_pause_frame = getattr(vla_dataset_cfg, 'delete_pause_frame', True)
+
+        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg, delete_pause_frame=delete_pause_frame)
         
         vla_train_dataloader = DataLoader(
             vla_dataset,
@@ -50,9 +54,10 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             collate_fn=collate_fn,
             num_workers=8,
             # shuffle=True
-        )        
-        if dist.get_rank() == 0: 
-            
+        )
+        # Check if distributed training is initialized before calling get_rank
+        is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        if is_main_process:
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")
         return vla_train_dataloader

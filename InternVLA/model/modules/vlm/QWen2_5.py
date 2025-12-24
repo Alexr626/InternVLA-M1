@@ -1,3 +1,4 @@
+import os
 import torch
 import transformers
 from typing import Optional, List
@@ -15,6 +16,43 @@ from qwen_vl_utils import process_vision_info
 from accelerate.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _is_deepspeed_zero3_enabled():
+    """Check if DeepSpeed ZeRO-3 is enabled via environment or accelerate state."""
+    # Check accelerate's DeepSpeed plugin state
+    try:
+        from accelerate.state import PartialState
+        state = PartialState()
+        if hasattr(state, 'deepspeed_plugin') and state.deepspeed_plugin is not None:
+            ds_config = state.deepspeed_plugin.deepspeed_config
+            zero_stage = ds_config.get('zero_optimization', {}).get('stage', 0)
+            if zero_stage == 3:
+                return True
+    except Exception:
+        pass
+
+    # Fallback: check environment variable set by DeepSpeed
+    # When ZeRO-3 is active, DeepSpeed sets this
+    if os.environ.get('ACCELERATE_USE_DEEPSPEED', '').lower() == 'true':
+        # Try to read config file path and check stage
+        config_file = os.environ.get('ACCELERATE_DEEPSPEED_CONFIG_FILE', '')
+        if config_file and os.path.exists(config_file):
+            try:
+                import json
+                import yaml
+                with open(config_file, 'r') as f:
+                    if config_file.endswith('.json'):
+                        ds_config = json.load(f)
+                    else:
+                        ds_config = yaml.safe_load(f)
+                zero_stage = ds_config.get('zero_optimization', {}).get('stage', 0)
+                if zero_stage == 3:
+                    return True
+            except Exception:
+                pass
+
+    return False
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
@@ -77,12 +115,22 @@ class _QWen_VL_Interface(nn.Module):
         qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen2.5-VL-3B-Instruct")
 
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id,
-            attn_implementation="flash_attention_2",
-            torch_dtype="auto",
-            device_map="cuda",
-        )
+        # Check if DeepSpeed ZeRO-3 is enabled - it's incompatible with device_map
+        use_zero3 = _is_deepspeed_zero3_enabled()
+        if use_zero3:
+            logger.info("DeepSpeed ZeRO-3 detected, loading model without device_map")
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation="flash_attention_2",
+                torch_dtype="auto",
+            )
+        else:
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation="flash_attention_2",
+                torch_dtype="auto",
+                device_map="cuda",
+            )
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 

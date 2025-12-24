@@ -86,7 +86,8 @@ def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 
     accelerator.dataloader_config.dispatch_batches = False
-    dist.barrier()
+    # Note: Removed dist.barrier() here as it can hang with non-contiguous GPU IDs
+    # The accelerator.prepare() call later handles synchronization properly
 
     return vla_train_dataloader
 
@@ -146,13 +147,8 @@ class VLATrainer(TrainerUtils):
             )
             self.model = self.load_pretrained_backbones(self.model, pretrained_checkpoint, reload_modules=reload_modules)
 
-        # freeze parameters
-        freeze_modules = (
-            self.config.trainer.freeze_modules
-            if (self.config and hasattr(self.config.trainer, "freeze_modules"))
-            else None
-        )
-        self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
+        # Note: freeze_modules is now called in main() BEFORE optimizer creation
+        # to ensure optimizer only tracks trainable parameters
 
         #  print model trainable parameters:
         self.print_trainable_parameters(self.model)
@@ -186,6 +182,10 @@ class VLATrainer(TrainerUtils):
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
                 group="vla-train",
+                settings=wandb.Settings(
+                    _disable_stats=True,  # Disable system stats (GPU util, fan speed, etc.)
+                    _disable_meta=True,   # Disable metadata collection
+                ),
             )
 
     def _init_checkpointing(self):
@@ -272,6 +272,8 @@ class VLATrainer(TrainerUtils):
         )
 
         # main training loop
+        import time
+        step_start_time = time.time()
         while self.completed_steps < self.config.trainer.max_train_steps:
             # get data batch
             batch_vla = self._get_next_batch()
@@ -283,6 +285,11 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
+
+                # compute time per step
+                step_end_time = time.time()
+                step_metrics["time_per_step"] = step_end_time - step_start_time
+                step_start_time = step_end_time
 
             # evaluate model
             if self.completed_steps % self.config.trainer.eval_interval == 0:
@@ -353,6 +360,7 @@ class VLATrainer(TrainerUtils):
 
     def _train_step(self, batch_vla, batch_vlm=None):
         """execute single training step"""
+        grad_norm = None
         with self.accelerator.accumulate(self.model):
             self.optimizer.zero_grad()
 
@@ -366,17 +374,22 @@ class VLATrainer(TrainerUtils):
             # VLA backward propagation
             self.accelerator.backward(total_loss)
 
-            # gradient clipping
+            # gradient clipping and compute gradient norm
             if self.config.trainer.gradient_clipping is not None:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+                grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+                if hasattr(grad_norm, 'item'):
+                    grad_norm = grad_norm.item()
 
             # optimizer step
             self.optimizer.step()
             self.lr_scheduler.step()
 
-        return {
+        metrics = {
             "action_dit_loss": action_loss.item(),
         }
+        if grad_norm is not None:
+            metrics["grad_norm"] = grad_norm
+        return metrics
 
     def _finalize_training(self):
         """training end processing"""
@@ -404,6 +417,14 @@ def main(cfg) -> None:
     vla = build_framework(cfg)
     # prepare data
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+
+    # Freeze modules BEFORE creating optimizer (so optimizer only tracks trainable params)
+    freeze_modules = (
+        cfg.trainer.freeze_modules
+        if (cfg and hasattr(cfg.trainer, "freeze_modules"))
+        else None
+    )
+    vla = TrainerUtils.freeze_backbones(vla, freeze_modules=freeze_modules)
 
     # set optimizer and scheduler
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
